@@ -1,4 +1,4 @@
-# gimme-ppt-skill
+# kimippt-skill
 
 A [Claude Code](https://claude.ai/code) skill that generates a PowerPoint deck by driving [kimi.com/slides](https://www.kimi.com/slides) in your **already-logged-in Chrome**, then downloads and delivers the `.pptx`.
 
@@ -56,9 +56,9 @@ It is a **wrapper around a real browser session**, not an API reimplementation â
 Copy this folder into your Claude Code skills directory:
 
 ```bash
-git clone https://github.com/cloveric/gimme-ppt-skill.git
+git clone https://github.com/cloveric/kimippt-skill.git
 mkdir -p ~/.claude/skills
-cp -r gimme-ppt-skill ~/.claude/skills/kimippt
+cp -r kimippt-skill ~/.claude/skills/kimippt
 ```
 
 (The skill is named `kimippt` internally so its trigger-aliases match that name. You can fold it under a different directory name if you prefer, but Claude Code keys off the `name:` field inside `SKILL.md`.)
