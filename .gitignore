@@ -1,0 +1,7 @@
+.DS_Store
+*.pptx
+*.docx
+*.pdf
+.idea/
+.vscode/
+node_modules/
