@@ -50,16 +50,22 @@ Before doing anything Kimi-specific:
    ```
    Report both back to the user in one line ("当前 Chrome 标签是 `<title>` @ `<url>`") before moving on. If title/url look like an empty about:blank session or a brand-new Chrome, something is wrong — stop and flag it.
 
-3. **Resolve the input document path.** Use the absolute path from the user's message verbatim (e.g. a file they uploaded through your harness). Do not re-fetch or re-upload.
+3. **Resolve the input document path.** Telegram uploads land at `~/.cctb/default/workspace/.telegram-files/<id>/input/<file>`. Use the path from the user's message verbatim (absolute). Do not re-fetch or re-upload.
 
 ## Default Settings
 
 Unless overridden in the same message:
 
 - **Layout (布局)** — `智能布局`
+- **Category (类别)** — `通用`
 - **Style (风格)** — `自由风格`
 
-If the user writes e.g. "用商务风", "换成极简" — pick that style instead. Everything else (page count, theme color) stays default.
+If the user writes e.g. "用商务风", "换成极简" — pick that style instead.
+
+**Consulting / McKinsey-style requests** (user says "麦肯锡风格", "咨询风格", "BCG 风", "战略报告"):
+- Switch **Category** to `商业洞察` first — this swaps the theme list to consulting-flavored options (`翠金洞察 / 灰钢质感 / 赤线锐评 / 藏蓝铜金 / 酒红咨询`).
+- Then pick **Theme** `藏蓝铜金` (navy + bronze gold, closest to classic McKinsey palette).
+- Page count: ask user or set explicitly via the picker (see Step 4b). Don't leave on `自动页数` for long reports.
 
 ## Workflow
 
@@ -83,37 +89,113 @@ Never collapse these three into one "登不了" message.
 
 ### Step 3 — Upload the document
 
-Kimi's page exposes either a visible "上传" button or a drop zone with a hidden `<input type="file">`. Workflow:
+**Kimi's quirk**: the `<input type="file">` doesn't exist in DOM until you click the **`+` button** (`.toolkit-trigger-btn`) inside the chat editor.
+
+⚠️ **Identifying the right `+` button**: don't grep snapshot output for "button" — the actual `+` shows up as a **nameless `generic clickable`** (AX role `generic`, not `button`), and it sits **right next to the prompt textbox** in the `.chat-editor-action` area. There's also an unrelated nameless `button` in the sidebar (the "添加联系人" button next to "发起群聊") — clicking that does nothing useful and wastes a turn. Stable identifier:
 
 ```bash
-agent-browser snapshot -i            # find the upload control
-agent-browser upload @eN /absolute/path/to/file.docx
-agent-browser wait 3000              # let the client ack the file
-agent-browser snapshot -i            # confirm filename now visible
+agent-browser eval 'document.querySelector(".toolkit-trigger-btn") ? "found" : "missing"'   # always-correct hook
 ```
 
-If clicking the visible button first is required to reveal the file input, do that with `click @eN`, then re-snapshot and `upload`.
+After the menu opens, the AX tree exposes a `LabelText "文件和图片" [ref=eN]` — that label **wraps** the real file input but is **not** the input itself, so `upload @eN` will fail with `CDP error: Node is not a file input element`.
 
-### Step 4 — Pick layout + style
-
-After the file is accepted, layout + style pickers should be visible. Re-snapshot and:
+Correct flow:
 
 ```bash
-agent-browser find text "智能布局" click
-agent-browser snapshot -i
-agent-browser find text "自由风格" click       # or the user-specified override
-agent-browser snapshot -i
+# Click the + button via its stable class (skips the AX-tree confusion above)
+agent-browser eval 'document.querySelector(".toolkit-trigger-btn").click()'
+agent-browser wait 800
+agent-browser eval 'document.querySelectorAll("input[type=file]").length'   # confirm: should be 1
+agent-browser upload "input[type=file]" /absolute/path/to/file.md           # use CSS selector, NOT @eN ref
+agent-browser wait 4000
+agent-browser snapshot -i                                # confirm file chip now shows filename + size
 ```
 
-If these options only appear after a "下一步" step, handle that transition first, then re-snapshot and click.
+After the upload **immediately close the lingering popovers** (see Step 4 — there's a persistent `prompt-modal` that will block subsequent clicks if you don't).
 
-### Step 5 — Kick off generation
+### Step 4 — Close lingering popovers, then pick category / theme / page count
 
-Click the final generate/创建 button (common labels: `生成`, `开始生成`, `创建 PPT`). Record the start time.
+**Critical first move**: clicking the `+` button in Step 3 leaves a persistent `prompt-modal` (常用语) panel open that **overlays the lower controls** and silently blocks clicks on `自动页数 / 商业洞察 / 主题卡` — Escape doesn't close it. Hide it via JS before doing anything else:
 
 ```bash
-agent-browser find text "生成" click     # pick the button, not a heading
-agent-browser snapshot -i
+agent-browser eval 'document.querySelectorAll(".prompt-modal, .n-popover").forEach(el => el.style.display = "none")'
+```
+
+#### 4a. Category (类别)
+
+Default is `通用`. For consulting-style requests, switch to `商业洞察` — this changes which themes are offered:
+
+```bash
+agent-browser eval '(() => {
+  const t = Array.from(document.querySelectorAll(".line-tab")).find(el => el.textContent.trim() === "商业洞察");
+  t?.click(); return t ? "ok" : "not found";
+})()'
+```
+
+#### 4b. Page count (页数)
+
+Default is `自动页数`. To set explicit count, click the `.page-limit-button`, then pick the bucket:
+
+```bash
+agent-browser eval 'document.querySelector(".page-limit-button").click()'
+agent-browser wait 600
+agent-browser eval '(() => {
+  const item = Array.from(document.querySelectorAll("*")).find(el => el.textContent?.trim() === "16-20 页" && el.children.length === 0);
+  item?.click(); return item ? "ok" : "not found";
+})()'
+agent-browser eval 'document.querySelector(".page-limit-button span")?.textContent'   # verify
+```
+
+Buckets are coarse (`1-5 / 6-10 / 11-15 / 16-20 / 21-25 / 26-30`) — pick the bucket containing the user's target.
+
+#### 4c. Theme (风格)
+
+⚠️ **AX tree is misleading**: every theme card shows `已选择 蔚蓝冲击 / 已选择 铅灰未来 / ...` — the `已选择` is just a label prefix, not selection state. **Source of truth is the `.style-card.selected` class.** Verify before and after:
+
+```bash
+agent-browser eval 'Array.from(document.querySelectorAll(".style-card.selected")).map(el => el.textContent.trim())'
+```
+
+To switch theme (e.g. McKinsey → `藏蓝铜金`):
+
+```bash
+agent-browser eval '(() => {
+  const c = Array.from(document.querySelectorAll(".style-card")).find(el => el.textContent.includes("藏蓝铜金"));
+  c?.click(); return c ? "ok" : "not found";
+})()'
+```
+
+### Step 5 — Type the prompt and kick off generation
+
+#### 5a. Type the prompt
+
+Get the textbox ref from a fresh snapshot (it's the `textbox [ref=eN]` inside `.chat-editor`), then type:
+
+```bash
+agent-browser type @e<textbox> "your full prompt here..."
+agent-browser eval '(() => document.querySelector(".chat-editor [contenteditable=true]").innerText.length)()'   # confirm length
+```
+
+#### 5b. Vue trick: wake up the disabled send button
+
+`agent-browser type` inserts text in a paste-style way that **does not fire Vue's input event**, so `.send-button-container` stays `disabled` even with text in the box. Fix: append one more character via real keypress:
+
+```bash
+agent-browser eval 'String(document.querySelector("[class*=send-button]").className)'
+# If output still contains "disabled":
+agent-browser type @e<textbox> "."
+agent-browser eval 'String(document.querySelector("[class*=send-button]").className)'
+# Should now be "send-button-container" (no "disabled")
+```
+
+#### 5c. Click send
+
+There is **no text-labeled "生成" button** — Kimi uses an icon-only send button. Click it via class:
+
+```bash
+agent-browser eval 'document.querySelector("[class*=send-button]").click()'
+agent-browser wait 3000
+agent-browser snapshot -i      # confirm new chat session named after the topic appears
 ```
 
 ### Step 6 — Wait patiently — generation takes minutes
@@ -129,36 +211,81 @@ Between waits, a short progress ping to the user every ~3 minutes is friendly: "
 
 Do **not** use a `sleep`-based polling loop at the bash level — use `agent-browser wait <ms>` and keep the number of Bash turns low.
 
-### Step 7 — Download the PPTX
+### Step 7 — Download the PPTX (via the editor iframe)
 
-When the download affordance appears:
+When generation finishes, the chat shows a result card titled `<topic>` with subtitle `点击编辑和下载` and an action button `去编辑`. **The download flow is NOT in the chat page** — it's inside an iframe `.ppt-frame` (same-origin) that loads the actual editor.
+
+#### 7a. Open the editor iframe
+
+The `去编辑` button reveals the iframe but the chat URL doesn't change. Easiest path: just operate the iframe contentDocument directly (it's already loaded).
 
 ```bash
-agent-browser snapshot -i
-# Locate the download/export button and the format picker
-agent-browser click @eN           # opens download menu
-agent-browser snapshot -i
-agent-browser find text "PPTX" click
+agent-browser eval '(() => {
+  const f = document.querySelector(".ppt-frame");
+  return { hasIframe: !!f, src: f?.src };
+})()'
 ```
 
-Kimi saves to Chrome's default download directory (typically `~/Downloads/`). Resolve the newest `.pptx`:
+If `hasIframe` is false, click the `去编辑` button:
+
+```bash
+agent-browser eval '(() => {
+  const btn = Array.from(document.querySelectorAll("*")).find(el => el.textContent?.trim() === "去编辑" && el.children.length < 3);
+  btn?.click(); return btn ? "ok" : "not found";
+})()'
+agent-browser wait 3000
+```
+
+#### 7b. Click 导出 inside the iframe
+
+```bash
+agent-browser eval '(() => {
+  const doc = document.querySelector(".ppt-frame").contentDocument;
+  const btn = Array.from(doc.querySelectorAll("[class*=button]")).find(b => b.textContent?.trim() === "导出");
+  btn?.click(); return btn ? "ok" : "not found";
+})()'
+agent-browser wait 1500
+```
+
+This opens an `export-dialog` modal inside the iframe. Default format is **`PPT`** (yes, "PPT" — but the file actually saves as `.pptx`). Alternatives: `图片`. No "PPTX" label exists.
+
+#### 7c. Click 直接下载
+
+```bash
+agent-browser eval '(() => {
+  const doc = document.querySelector(".ppt-frame").contentDocument;
+  const btn = Array.from(doc.querySelectorAll("[class*=button]")).find(b => b.textContent?.trim() === "直接下载");
+  btn?.click(); return btn ? "ok" : "not found";
+})()'
+agent-browser wait 8000
+```
+
+(Sibling button is `选择目录` — opens a directory picker. We use `直接下载` which saves to `~/Downloads/`.)
+
+#### 7d. Resolve the file
 
 ```bash
 ls -t ~/Downloads/*.pptx 2>/dev/null | head -1
 ```
 
-If no file appears within 30s, re-snapshot — Kimi may be finalizing.
+Kimi names it after the deck title (e.g. `中国制造业研究报告（2024–2026 Q1）.pptx`). If nothing appears within 30s, re-check the iframe for a paywall or error banner.
 
 ### Step 8 — Move & deliver
 
-Copy into a workspace folder so it is easy to find later (adjust `$WORKSPACE` to wherever your harness keeps generated artifacts):
+Copy into the workspace so it is easy to find later:
 
 ```bash
-mkdir -p "$WORKSPACE/kimi-ppt"
-cp "<newest_downloads_path>" "$WORKSPACE/kimi-ppt/<slug>-$(date +%Y%m%d-%H%M).pptx"
+mkdir -p ~/.cctb/default/workspace/kimi-ppt
+cp "<newest_downloads_path>" ~/.cctb/default/workspace/kimi-ppt/<slug>-$(date +%Y%m%d-%H%M).pptx
 ```
 
-Then deliver the file through whatever mechanism your harness uses — e.g. a Telegram bridge `[send-file:<absolute-path>]` tag, an MCP attachment tool, or just surfacing the absolute path. Follow with a one-line summary: filename + slide count if you could read it from the final snapshot.
+Then deliver via the Telegram file tag in your reply:
+
+```
+[send-file:/Users/cloveric/.cctb/default/workspace/kimi-ppt/<slug>-YYYYMMDD-HHMM.pptx]
+```
+
+Follow with a one-line summary: filename + slide count if you could read it from the final snapshot.
 
 ## Error Handling — precise diagnosis, no hand-waving
 
@@ -181,6 +308,22 @@ Always name which branch you hit:
 - Do not say "登不了" without telling the user which of the 4 failure branches you hit.
 - Do not run a tight polling loop of snapshots — use `agent-browser wait <ms>`.
 
+## Known Kimi UI Quirks — Cheat Sheet
+
+When the AX tree / `find text` / `click @eN` aren't working, it's usually one of these:
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| 1 | Click on `自动页数 / 商业洞察 / theme card` does nothing | Persistent `.prompt-modal` (常用语) panel overlays controls; Escape can't dismiss it | `agent-browser eval 'document.querySelectorAll(".prompt-modal, .n-popover").forEach(el => el.style.display = "none")'` |
+| 2 | `agent-browser upload @e<LabelText>` → `Node is not a file input element` | The `LabelText "文件和图片"` ref is not the input itself; the actual `<input type=file>` is its hidden child and only exists after you click the `+` button | First click the `+` (`.toolkit-trigger-btn`), then `agent-browser upload "input[type=file]" /path` (CSS selector, not `@eN`) |
+| 3 | Send button stays `.send-button-container.disabled` even though prompt textbox shows full text | `agent-browser type` inserts paste-style; Vue's `input` event never fires | Append one more char with `agent-browser type @e<textbox> "."` — fires real keypress, Vue syncs, button enables |
+| 4 | All theme cards show `已选择 X` in AX names — looks like all selected | `已选择` is a hard-coded label prefix, not state | Read `Array.from(document.querySelectorAll(".style-card.selected")).map(el => el.textContent)` for the truth |
+| 5 | No "生成" / "开始生成" text button anywhere | Send is an icon-only div with class `.send-button-container` | Click via `document.querySelector("[class*=send-button]").click()` |
+| 6 | `find text "PPTX"` → nothing | The format radio is labeled `PPT` (the file is still `.pptx`); option labels are `PPT` and `图片` | Default is `PPT` already — just click `直接下载` |
+| 7 | Result card click does nothing visible; URL doesn't change | The PPT editor is in a same-origin `iframe.ppt-frame`, not a new page | Operate via `document.querySelector(".ppt-frame").contentDocument.querySelector(...)` |
+| 8 | Page count picker — `find text "16-20 页" click` doesn't fire | Dropdown lives in a portal that may close on the next snapshot | `eval` the open-then-pick chain in one shot: open `.page-limit-button`, then click the matching item by textContent |
+| 9 | Clicked the "+" button → nothing happened, file input never appeared | Picked the wrong nameless control: snapshot shows two unnamed controls — sidebar `button "添加联系人"` (not it) AND chat-editor's `generic clickable` (the real `+`). Don't grep for "button" | Always click via stable class: `agent-browser eval 'document.querySelector(".toolkit-trigger-btn").click()'` |
+
 ## agent-browser Cheatsheet (in order of use here)
 
 ```bash
@@ -191,10 +334,12 @@ agent-browser open <url>
 agent-browser wait --load networkidle
 agent-browser snapshot -i           # accessibility tree w/ @eN refs
 agent-browser click @eN
-agent-browser find text "..." click # click by visible text
-agent-browser upload @eN /abs/path
+agent-browser find text "..." click # click by visible text (less reliable on Kimi than eval)
+agent-browser type @eN "text"       # for prompt input — fires real keypresses
+agent-browser upload <selector> /abs/path  # use CSS selector when @eN is a wrapper, not the input
+agent-browser eval '<JS>'           # heavy lifter for Kimi: hide modals, query .selected state, click via class, drive the iframe
 agent-browser wait <ms>             # long wait between polls
-agent-browser screenshot out.png    # sanity check only, use sparingly
+agent-browser screenshot out.png    # sanity check only; daemon may be busy if used right after eval/click
 ```
 
-Refs (`@e1`, `@e2`…) are reassigned on every snapshot. Re-snapshot after any page change before using refs again.
+Refs (`@e1`, `@e2`…) are reassigned on every snapshot. Re-snapshot after any page change before using refs again. **For Kimi specifically, `eval` with class-based queries is more reliable than `@eN` refs because Kimi's controls are Vue components in portals/popovers that the AX tree often misrepresents.**
